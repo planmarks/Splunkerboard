@@ -1,0 +1,113 @@
+# =============================================================================
+#  Splunkerboard: files that don't belong in the public repository
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+#  KiCad: local state, history, caches, backups
+# -----------------------------------------------------------------------------
+# Local history snapshots (~140 MB, and each contains a nested .git repo)
+.history/
+# Per-user UI state (open layers, zoom, window layout), incl. stray Spu*/ESP* copies
+*.kicad_prl
+# Footprint cache, automatic backups, lock files, autosaves
+fp-info-cache
+*-backups/
+*.lck
+~*.lck
+_autosave-*
+*.kicad_sch-bak
+*.kicad_pcb-bak
+*.bak
+*-bak
+*.bck
+# Stale exported netlists (regenerate from the schematic when needed)
+*.net
+# Exporter by-products
+*-cache.lib
+*.dsn
+*.ses
+*-rescue.kicad_sym
+
+# Duplicate copy of the Dev (DIY) gerbers inside the expansion-board folder
+Splunker 1 Prototyping Board/Spunkleboard Gerber 2208/
+Splunker 1 Prototyping Board/Spunkleboard Gerber 2208.zip
+
+# -----------------------------------------------------------------------------
+#  Blender: auto-backups (keep the .blend sources)
+# -----------------------------------------------------------------------------
+*.blend[0-9]
+*.blend[0-9][0-9]
+
+# -----------------------------------------------------------------------------
+#  Large / duplicated / superseded media
+#  (current models live in "Splunker 1/3D/", current renders in "Splunker 1/")
+# -----------------------------------------------------------------------------
+# 25 MB scratch test render (×3 copies)
+Spunkleboard-test-render.png
+# Superseded board exports (current versions are in Splunker 1/3D/)
+Spunkleboard.stl
+Spunkleboard.glb
+Spunkleboard1.glb
+/Splunker 1/Splunkerboard.stl
+/Splunker 1 Prototyping Board/Splunkerboard.stl
+/Splunkerboard DIY/Splunkerboard.stl
+# Copies of the V1C renders in folders that aren't the V1C board
+/Splunker 1 Prototyping Board/Render-V1C-*.png
+/Splunkerboard DIY/Render-V1C-*.png
+
+# -----------------------------------------------------------------------------
+#  Firmware: build output, IDE/tooling state
+# -----------------------------------------------------------------------------
+build/
+.build/
+.pio/
+.pioenvs/
+.piolibdeps/
+.vscode/
+.idea/
+compile_commands.json
+*.elf
+*.map
+*.o
+*.a
+*.d
+# Firmware images and flash dumps. A full flash dump from a Sentinel wallet
+# holds the encrypted seed, and dumps from other firmwares hold Wi-Fi/Wigle
+# credentials from NVS.
+*.bin
+*.hex
+*.uf2
+
+# -----------------------------------------------------------------------------
+#  Secrets & personal data
+# -----------------------------------------------------------------------------
+secrets.h
+credentials.h
+*_secrets.h
+.env
+.env.*
+*.pem
+*.key
+# ESP-IDF Secure Boot / flash-encryption keys (Sentinel "Phase 7")
+*signing_key*
+*flash_encryption_key*
+# WarPet capture exports (MAC addresses, SSIDs and locations of third parties)
+captures*.csv
+captures*.bin
+seen_*.bin
+*.wiglecsv
+# Serial logs (may contain addresses, xpubs or device identifiers)
+*.log
+
+# -----------------------------------------------------------------------------
+#  OS / editor junk
+# -----------------------------------------------------------------------------
+.DS_Store
+Thumbs.db
+ehthumbs.db
+desktop.ini
+$RECYCLE.BIN/
+*.swp
+*.swo
+*~
+*.tmp
