@@ -1,0 +1,6 @@
+profiles:
+  xiao:
+    fqbn: esp32:esp32:XIAO_ESP32C3
+    platforms:
+      - platform: esp32:esp32
+default_profile: xiao
