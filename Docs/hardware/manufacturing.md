@@ -87,6 +87,6 @@ All of these values are within the standard capabilities of JLCPCB and PCBWay. T
 | `Splunker 1/3D/*.glb` | Same models in glTF binary (for web viewers, Blender, three.js) |
 | `Splunker 1/3D/Spunkleboard 1 3D.blend` | Blender scene |
 | `Splunker 1/Case/Splunkerboard Case.blend` | **Enclosure design** (Blender). Export it to STL for 3D printing. |
-| `Splunker 1/Render-V1C-*.png` | Product renders (white / transparent backgrounds) |
+| `Splunker 1/Render-V1C-*.png` | Product renders (white / transparent backgrounds). Despite the "V1C" name, they show the **Dev board**; there is no Splunkerboard 1 render yet. |
 
 > **Repo hygiene:** the [`.gitignore`](../../.gitignore) leaves local-only and superseded files out of the public repo. That covers KiCad `.history/` snapshots (which contain nested git repos), `*.kicad_prl` UI state, backups and stale `*.net` netlists, Blender `.blend1` backups, the 25 MB `Spunkleboard-test-render.png`, the older `Spunkleboard.stl`/`.glb` exports, and the render and STL copies duplicated into the DIY and expansion-board folders. The largest tracked files are the STLs in `Splunker 1/3D/` (~36 MB), under GitHub's 50 MB warning threshold. If they grow, move `*.stl`/`*.glb` to Git LFS.

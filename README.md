@@ -1,12 +1,18 @@
 # Splunkerboard
 
+[![License](https://img.shields.io/badge/license-not%20yet%20chosen-lightgrey.svg)](#license)
+![MCU](https://img.shields.io/badge/MCU-XIAO%20ESP32%20C3%20%7C%20C5%20%7C%20C6%20%7C%20S3-success)
+![Wireless](https://img.shields.io/badge/wireless-Wi--Fi%202.4%20%2F%205%20GHz%20%7C%20BLE%205%20%7C%20ESP--NOW-informational)
+![Display](https://img.shields.io/badge/display-SSD1306%20128%C3%9764%20OLED-informational)
+![Firmware](https://img.shields.io/badge/firmware-Arduino--ESP32%203.x-orange)
+![KiCad](https://img.shields.io/badge/KiCad-10-314CB0)
+![Open Hardware](https://img.shields.io/badge/hardware-open%20source-brightgreen)
+
 **A handheld development and prototyping platform for the Seeed Studio XIAO ESP32 family.**
 
 Splunkerboard puts the things most handheld projects need on one PCB: a 0.96" 128×64 OLED, a six-button D-pad, a LiPo connector with a power switch and, on Splunkerboard 1, a microSD slot, an I/O expander, a battery fuel gauge and breakout headers. Solder on a XIAO ESP32 module (C3, C5, C6, S3 …), plug in USB-C, and start writing firmware.
 
-<p align="center">
-  <img src="Splunker%201/Render-V1C-transparentbg.png" alt="Splunkerboard 1 (V1C) render" width="640">
-</p>
+<img src="Splunker%201/Render-V1C-transparentbg.png" alt="Splunkerboard Dev 3D render, back and front: XIAO ESP32 module with USB-C and slide switch, 0.96&quot; OLED module, six-button D-pad, edge-mount SMA antenna connector and breakout headers" width="540">
 
 The schematics, PCB layouts, fabrication files and firmware are all open.
 

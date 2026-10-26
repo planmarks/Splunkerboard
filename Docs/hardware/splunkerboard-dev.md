@@ -4,6 +4,10 @@ The compact base variant: a XIAO, an OLED module, six buttons and a battery swit
 
 ← [Hardware overview](README.md) · [Main README](../../README.md)
 
+<p align="center">
+  <img src="../../Splunker%201/Render-V1C-single-transparentbg.png" alt="Splunkerboard Dev render: OLED module, six buttons, SMA antenna connector and breakout headers" width="420">
+</p>
+
 | | |
 |---|---|
 | Source folder | [`Splunkerboard DIY/`](../../Splunkerboard%20DIY) |

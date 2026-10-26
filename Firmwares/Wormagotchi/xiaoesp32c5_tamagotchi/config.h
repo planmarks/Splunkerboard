@@ -5,15 +5,47 @@
 #pragma once
 
 // ----------------------------------------------------------------------------
-//  Buttons  (XIAO silkscreen labels -> Arduino D-macros defined by the variant).
-//  Wired to GND, using internal pull-ups (active LOW).
+//  Buttons  -  on the MCP23017 I/O expander (I2C), port A bit numbers.
+//  Each button shorts its line to GND; the expander's internal 100k pull-ups
+//  are enabled, so a pressed button reads 0 (active LOW).
+//  INTA is wired to XIAO D0 (unused here: the port is polled).
 // ----------------------------------------------------------------------------
-#define PIN_BTN_UP     D0   // GPIO1
-#define PIN_BTN_DOWN   D1   // GPIO0
-#define PIN_BTN_OK     D2   // GPIO25
-#define PIN_BTN_BACK   D3   // GPIO7
-#define PIN_BTN_LEFT   D8   // GPIO8
-#define PIN_BTN_RIGHT  D9   // GPIO9
+#define MCP_ADDR       0x20   // A0/A1/A2 tied to GND
+#define MCP_POLL_MS    5      // how often port A is read over I2C
+
+#define BTN_BIT_UP     0      // GPA0
+#define BTN_BIT_DOWN   1      // GPA1
+#define BTN_BIT_OK     2      // GPA2
+#define BTN_BIT_BACK   3      // GPA3
+#define BTN_BIT_LEFT   4      // GPA4
+#define BTN_BIT_RIGHT  5      // GPA5
+#define BTN_MASK       0x3F   // GPA0..GPA5
+
+// ----------------------------------------------------------------------------
+//  Battery fuel gauge  (MAX17048, I2C).  Reports state of charge in %.
+// ----------------------------------------------------------------------------
+#define GAUGE_ADDR     0x36
+#define GAUGE_POLL_MS  5000   // battery % refresh interval
+
+// ----------------------------------------------------------------------------
+//  microSD  (SPI mode, push-push slot with card-detect switch).
+//  When a card is present every capture is also appended to a CSV archive on
+//  it; the internal flash ring buffer keeps working either way.
+// ----------------------------------------------------------------------------
+#define ENABLE_SD          1
+#define SD_PIN_CS          D2
+#define SD_PIN_CD          D1     // card-detect (4.7k pull-up on board)
+#define SD_PIN_SCK         D8
+#define SD_PIN_MISO        D9
+#define SD_PIN_MOSI        D10
+#define SD_USE_CD          1      // 0 = ignore card-detect, retry mounting instead
+#define SD_CD_ACTIVE       LOW    // card-detect level with a card inserted
+#define SD_SPI_HZ          20000000  // drop to 4000000 if the card is unreliable
+#define SD_CHECK_MS        500    // card-detect poll interval
+#define SD_RETRY_MS        10000  // remount retry interval when SD_USE_CD = 0
+#define SD_FLUSH_MS        5000   // max time captures sit unflushed in RAM
+#define SD_DIR             "/warpet"
+#define SD_CAPTURE_PATH    "/warpet/captures.csv"
 
 // ----------------------------------------------------------------------------
 //  OLED  (0.96" SSD1306, 128x64, I2C).  Default XIAO I2C = D4(SDA)/D5(SCL).
@@ -21,7 +53,7 @@
 #define OLED_WIDTH     128
 #define OLED_HEIGHT    64
 #define OLED_ADDR      0x3C   // most 0.96" modules; some are 0x3D
-#define OLED_ROTATION  2      // 0=normal, 2=180 (flipped)
+#define OLED_ROTATION  0      // 0=normal, 2=180 (flipped)
 
 // ----------------------------------------------------------------------------
 //  Feature toggles

@@ -5,7 +5,8 @@ A pocket **dual-band Wi-Fi + BLE wardriving rig that is also a Tamagotchi**, for
 
 Your creature earns XP from every **unique** discovery it makes as you walk around —
 Wi-Fi access points (2.4 GHz *and* 5 GHz), BLE devices, and Wi-Fi client stations
-picked up by the passive monitor. Captures are logged to an on-device ring buffer.
+picked up by the passive monitor. Captures are logged to an on-device ring buffer
+and, when a microSD card is inserted, archived to a CSV file on the card.
 Feed it, play with it, and watch it grow from an egg into an Elder — leveling is
 infinite, and higher stages unlock new sensing abilities.
 
@@ -38,20 +39,28 @@ don't store or share data you shouldn't.
 
 ## Hardware & wiring
 
-| Function | Button | XIAO pin | GPIO |
-|----------|--------|----------|------|
-| Up / Feed      | UP    | D0 | 1  |
-| Down / Play    | DOWN  | D1 | 0  |
-| OK / Pet       | OK    | D2 | 25 |
-| Back           | BACK  | D3 | 7  |
-| Left (screen)  | LEFT  | D8 | 8  |
-| Right (screen) | RIGHT | D9 | 9  |
+Targets **Splunkerboard 1**: buttons sit on an MCP23017 I/O expander and a
+MAX17048 fuel gauge reports battery %.
 
-- **Buttons:** each connects its pin to **GND** (internal pull-ups, active-low — no
-  resistors).
-- **OLED (SSD1306, I²C):** `VCC`→3V3, `GND`→GND, `SDA`→**D4 (GPIO23)**, `SCL`→**D5
-  (GPIO24)**, address `0x3C` (some are `0x3D`). Display is flipped 180° in firmware
-  (`OLED_ROTATION` in `config.h`).
+| Function | Button | MCP23017 pin |
+|----------|--------|--------------|
+| Up / Feed      | UP    | GPA0 |
+| Down / Play    | DOWN  | GPA1 |
+| OK / Pet       | OK    | GPA2 |
+| Back           | BACK  | GPA3 |
+| Left (screen)  | LEFT  | GPA4 |
+| Right (screen) | RIGHT | GPA5 |
+
+- **I²C bus:** `SDA`→**D4 (GPIO23)**, `SCL`→**D5 (GPIO24)**, shared by all three chips.
+- **Buttons (MCP23017, `0x20`):** each connects its line to **GND**; the expander's
+  internal pull-ups are enabled (active-low). Port A is polled every 5 ms; INTA→D0
+  is not used.
+- **Battery (MAX17048, `0x36`):** state of charge is read every 5 s and shown as a
+  battery icon + % on the home screen (also in the serial `i` command). Hidden if
+  the gauge isn't found.
+- **OLED (SSD1306, `0x3C`, some are `0x3D`):** unrotated (`OLED_ROTATION 0` in
+  `config.h`; set it to `2` to flip 180°).
+- **microSD (SPI):** `SCK`→D8, `MISO`→D9, `MOSI`→D10, `CS`→D2, card-detect→D1.
 
 Pins and every tunable live in [`config.h`](config.h).
 
@@ -89,7 +98,8 @@ hardware entropy (e.g. `Byte-Gremlin`), stored in NVS.
 | **Menu** | switch screen | up | down | select | Home |
 
 **Menu:** Feed · Play · Pet · Scan ON/OFF · *Pkt Monitor* (Teen+) · *Promisc Harvest*
-(Adult+) · Config (serial) · Save now · Reset pet (OK twice to confirm).
+(Adult+) · Config (serial) · Save now · *Format SD* (only with a card inserted) · Reset pet.
+Format SD and Reset pet need OK twice to confirm.
 
 ---
 
@@ -141,6 +151,26 @@ timestamp_s, type(AP2G/AP5G/BLE/CLIENT), mac, rssi, channel, ssid
 
 When the buffer fills (`RECORD_CAP`), the **oldest record is overwritten**. Uniqueness
 sets survive reboots (stored in LittleFS) so XP isn't re-awarded for the same devices.
+
+### microSD archive
+
+With a card inserted, every capture is **also** appended to `/warpet/captures.csv`
+on the card, which has no size cap:
+
+```
+uptime_s,type,mac,rssi,channel,name
+```
+
+- The card is mounted and unmounted automatically on insert/removal (card-detect on D1).
+  Writes are flushed every 5 s and on save, so pull the card at most ~5 s after the last
+  capture, or use *Save now* first.
+- The **Stats** screen header shows `SD` while archiving, `SD!` if the card is inserted
+  but unreadable. The serial `i` command prints card size and records archived.
+- **Menu → Format SD** (OK twice) erases the card and creates a fresh **FAT32**
+  filesystem, then starts a new log. Use it for new, exFAT (64 GB+) or corrupted cards.
+- If the card is never detected, check the card-detect polarity (`SD_CD_ACTIVE`) or set
+  `SD_USE_CD 0` in `config.h` to ignore the switch and retry mounting every 10 s.
+- Set `ENABLE_SD 0` to build without SD support.
 
 ---
 

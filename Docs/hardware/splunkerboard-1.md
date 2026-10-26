@@ -4,10 +4,6 @@ The full prototyping variant. Compared with the Dev board, it adds a microSD slo
 
 ← [Hardware overview](README.md) · [Main README](../../README.md)
 
-<p align="center">
-  <img src="../../Splunker%201/Render-V1C-single-transparentbg.png" alt="Splunkerboard 1 render" width="420">
-</p>
-
 | | |
 |---|---|
 | Source folder | [`Splunker 1/`](../../Splunker%201) |

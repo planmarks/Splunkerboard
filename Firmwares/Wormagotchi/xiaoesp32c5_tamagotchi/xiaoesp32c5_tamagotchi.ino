@@ -2,12 +2,13 @@
 //  WarPet  -  a dual-band Wi-Fi + BLE wardriving rig that is also a Tamagotchi
 //  Target : Seeed Studio XIAO ESP32-C5  (2.4G + 5G Wi-Fi 6, BLE 5)
 //  Display: 0.96" SSD1306 128x64 OLED (I2C)
-//  Input  : 6 buttons (UP/DOWN/OK/BACK/LEFT/RIGHT)
+//  Input  : 6 buttons (UP/DOWN/OK/BACK/LEFT/RIGHT) on an MCP23017 expander
+//  Storage: internal LittleFS ring + microSD (SPI); MAX17048 battery gauge
 //
 //  The creature earns XP from every UNIQUE discovery: Wi-Fi APs (2.4/5 GHz),
 //  BLE devices, and Wi-Fi client stations harvested by the passive monitor.
 //  Captures are logged to an on-device ring buffer (oldest overwritten when
-//  full). Home-Wi-Fi + Wigle credentials are configured over USB serial and
+//  full) and archived as CSV to microSD when a card is inserted. Home-Wi-Fi + Wigle credentials are configured over USB serial and
 //  kept in NVS for a future Wigle uploader (currently disabled: needs GPS).
 //
 //  SCOPE / SAFETY: this firmware is PASSIVE. It listens to broadcast beacons
@@ -40,6 +41,11 @@
 #if ENABLE_BLE
   #include <NimBLEDevice.h>
 #endif
+#if ENABLE_SD
+  #include <SPI.h>
+  #include <SD.h>
+  #include "ff.h"         // FatFs, for f_mkfs (format)
+#endif
 
 #include "names.h"
 #include "sprites.h"
@@ -56,6 +62,8 @@ enum ScanState {
   S_BLE_START, S_BLE_WAIT, S_COOLDOWN
 };
 
+enum SdState { SDS_NONE, SDS_READY, SDS_ERROR };   // no card / mounted / unreadable
+
 // Capture record type tags.
 enum RecType { RT_AP2G = 0, RT_AP5G = 1, RT_BLE = 2, RT_CLIENT = 3 };
 
@@ -69,7 +77,7 @@ struct __attribute__((packed)) Rec {
 };
 
 struct Button {
-  uint8_t  pin;
+  uint8_t  bit;        // MCP23017 port A bit
   bool     last      = false;
   bool     pressedEv = false;
   uint32_t tChange   = 0;
@@ -115,7 +123,7 @@ Screen   screen = SC_HOME;
 Mode     mode   = MODE_SCAN;
 bool     scanPaused = false;
 int      menuIdx = 0, menuTop = 0;
-bool     confirmReset = false;
+int      confirmId = -1;     // menu item id awaiting "OK=yes" (-1 = none)
 String   bubble; uint32_t bubbleUntil = 0;
 bool     levelUpFlag = false;
 const char* bandLabel = "--";
@@ -132,6 +140,15 @@ uint8_t  monChannel = MON_CH_MIN;
 uint32_t monHopTimer = 0, monEnergyTimer = 0;
 SemaphoreHandle_t monMutex = nullptr;
 std::map<uint64_t, CliObs> cliStaging; // filled by promisc cb, drained in loop
+
+// Battery (MAX17048). -1 = gauge not found / not read yet.
+int      battPct = -1;
+float    battVolts = 0;
+
+// microSD archive.
+SdState  sdState   = SDS_NONE;
+uint32_t sdRecords = 0;      // captures written to the card this session
+bool     sdDirty   = false;  // unflushed writes pending
 
 // Storage ring.
 File     storeFile;
@@ -309,6 +326,148 @@ void storageClear() {
   storeHead = storeCount = 0;
   storageInit();
 }
+// =============================================================================
+//  microSD archive  -  full capture history as CSV (no size cap). Mounted and
+//  unmounted automatically on card insert/removal.
+// =============================================================================
+#if ENABLE_SD
+File sdLog;
+
+static bool sdCardInserted() {
+#if SD_USE_CD
+  return digitalRead(SD_PIN_CD) == SD_CD_ACTIVE;
+#else
+  return true;
+#endif
+}
+static bool sdOpenLog() {
+  if (!SD.exists(SD_DIR)) SD.mkdir(SD_DIR);
+  sdLog = SD.open(SD_CAPTURE_PATH, FILE_APPEND);
+  if (!sdLog) return false;
+  if (sdLog.size() == 0) { sdLog.println(F("uptime_s,type,mac,rssi,channel,name")); sdLog.flush(); }
+  return true;
+}
+// formatIfEmpty: let the driver create a filesystem if the card has none.
+static bool sdMount(bool formatIfEmpty) {
+  if (!SD.begin(SD_PIN_CS, SPI, SD_SPI_HZ, "/sd", 5, formatIfEmpty)) { SD.end(); return false; }
+  if (SD.cardType() == CARD_NONE || !sdOpenLog()) { SD.end(); return false; }
+  return true;
+}
+static void sdUnmount() {
+  if (sdLog) sdLog.close();
+  SD.end();
+}
+// State after a failed mount/write: with card-detect we wait for a re-insert
+// (or a Format); without it we just keep retrying.
+static SdState sdFailState() { return SD_USE_CD ? SDS_ERROR : SDS_NONE; }
+
+void sdBegin() {
+#if SD_USE_CD
+  pinMode(SD_PIN_CD, INPUT);      // external 4.7k pull-up
+#endif
+  SPI.begin(SD_PIN_SCK, SD_PIN_MISO, SD_PIN_MOSI, SD_PIN_CS);
+  if (!sdCardInserted()) { Serial.println(F("SD: no card")); return; }
+  sdState = sdMount(false) ? SDS_READY : sdFailState();
+  if (sdState == SDS_READY)
+    Serial.printf("SD: %llu MB, logging to %s\n", SD.cardSize() / (1024ULL * 1024ULL), SD_CAPTURE_PATH);
+  else
+    Serial.println(F("SD: mount failed (use menu > Format SD)"));
+}
+
+void sdFlush() {
+  if (sdState == SDS_READY && sdDirty) { sdLog.flush(); sdDirty = false; }
+}
+
+void sdService() {
+  static uint32_t lastCheck = 0, lastFlush = 0, lastTry = 0;
+  uint32_t now = millis();
+  if (now - lastFlush >= SD_FLUSH_MS) { lastFlush = now; sdFlush(); }
+  if (now - lastCheck < SD_CHECK_MS) return;
+  lastCheck = now;
+
+  if (!sdCardInserted()) {
+    if (sdState != SDS_NONE) { sdUnmount(); sdState = SDS_NONE; say("SD removed"); }
+    return;
+  }
+  if (sdState == SDS_READY || sdState == SDS_ERROR) return;
+#if !SD_USE_CD
+  if (now - lastTry < SD_RETRY_MS) return;
+#endif
+  lastTry = now;
+  if (sdMount(false)) { sdState = SDS_READY; say("SD ready"); }
+  else { sdState = sdFailState(); if (SD_USE_CD) say("SD unreadable"); }
+}
+
+void sdAppend(const Rec& r) {
+  if (sdState != SDS_READY) return;
+  static const char* tn[] = {"AP2G", "AP5G", "BLE", "CLIENT"};
+  char nm[2 * sizeof(r.ssid) + 3];                  // CSV-quoted name
+  int k = 0;
+  nm[k++] = '"';
+  for (size_t i = 0; i < sizeof(r.ssid) && r.ssid[i]; i++) {
+    char c = ((uint8_t)r.ssid[i] < 0x20) ? ' ' : r.ssid[i];
+    if (c == '"') nm[k++] = '"';
+    nm[k++] = c;
+  }
+  nm[k++] = '"'; nm[k] = 0;
+  char line[128];
+  int n = snprintf(line, sizeof(line), "%u,%s,%02X:%02X:%02X:%02X:%02X:%02X,%d,%u,%s\n",
+                   (unsigned)r.ts, tn[r.type & 3], r.mac[0], r.mac[1], r.mac[2],
+                   r.mac[3], r.mac[4], r.mac[5], r.rssi, (unsigned)r.channel, nm);
+  if (sdLog.write((const uint8_t*)line, n) != (size_t)n) {
+    sdUnmount(); sdState = sdFailState(); say("SD write fail");
+    return;
+  }
+  sdRecords++; sdDirty = true;
+}
+
+// Index of the FatFs drive ("0:", "1:"...) backing the mounted card. The card is
+// the only FatFs volume this firmware mounts, so the first live drive is it.
+static int sdFindDrive() {
+  for (int i = 0; i < FF_VOLUMES; i++) {
+    char drv[4] = {(char)('0' + i), ':', '/', 0};
+    FF_DIR d;
+    if (f_opendir(&d, drv) == FR_OK) { f_closedir(&d); return i; }
+  }
+  return -1;
+}
+
+// Erase the card and create a fresh FAT32 (FAT16 on tiny cards) filesystem
+// with an MBR, then remount and start a new capture log. Blocks for a few s.
+bool sdFormat() {
+  if (!sdCardInserted()) return false;
+  sdDirty = false;
+  if (sdState != SDS_READY) {
+    // No usable filesystem: the driver formats it while mounting.
+    sdUnmount();
+    sdState = sdMount(true) ? SDS_READY : sdFailState();
+    if (sdState == SDS_READY) sdRecords = 0;
+    return sdState == SDS_READY;
+  }
+  if (sdLog) sdLog.close();
+  int drv = sdFindDrive();
+  FRESULT fr = FR_INVALID_DRIVE;
+  if (drv >= 0) {
+    char path[3] = {(char)('0' + drv), ':', 0};
+    const MKFS_PARM opt = {(BYTE)(FM_FAT | FM_FAT32), 2, 0, 0, 0};  // 2 FATs, auto cluster size
+    void* work = malloc(FF_MAX_SS);
+    fr = work ? f_mkfs(path, &opt, work, FF_MAX_SS) : FR_NOT_ENOUGH_CORE;
+    free(work);
+  }
+  SD.end();
+  if (fr != FR_OK) Serial.printf("SD format failed (FatFs err %d)\n", (int)fr);
+  sdState = (fr == FR_OK && sdMount(false)) ? SDS_READY : sdFailState();
+  if (sdState == SDS_READY) sdRecords = 0;
+  return sdState == SDS_READY;
+}
+#else
+void sdBegin() {}
+void sdService() {}
+void sdFlush() {}
+void sdAppend(const Rec&) {}
+bool sdFormat() { return false; }
+#endif
+
 // Log a discovery. Builds a Rec and appends it.
 void logCapture(RecType type, const uint8_t* mac, int8_t rssi, uint8_t ch,
                 const char* ssid) {
@@ -320,6 +479,7 @@ void logCapture(RecType type, const uint8_t* mac, int8_t rssi, uint8_t ch,
   r.channel = ch;
   if (ssid) { strncpy(r.ssid, ssid, sizeof(r.ssid) - 1); }
   storageAppend(r);
+  sdAppend(r);
 }
 
 // =============================================================================
@@ -591,16 +751,68 @@ void setMode(Mode m) {
 }
 
 // =============================================================================
-//  Buttons
+//  I2C register helpers (MCP23017: 8-bit regs, MAX17048: 16-bit big-endian)
 // =============================================================================
-Button bUp{PIN_BTN_UP}, bDown{PIN_BTN_DOWN}, bOk{PIN_BTN_OK},
-       bBack{PIN_BTN_BACK}, bLeft{PIN_BTN_LEFT}, bRight{PIN_BTN_RIGHT};
+static bool i2cWrite8(uint8_t addr, uint8_t reg, uint8_t val) {
+  Wire.beginTransmission(addr); Wire.write(reg); Wire.write(val);
+  return Wire.endTransmission() == 0;
+}
+static bool i2cRead(uint8_t addr, uint8_t reg, uint8_t* buf, uint8_t n) {
+  Wire.beginTransmission(addr); Wire.write(reg);
+  if (Wire.endTransmission(false) != 0) return false;
+  if (Wire.requestFrom(addr, n) != n) return false;
+  for (uint8_t i = 0; i < n; i++) buf[i] = Wire.read();
+  return true;
+}
+
+// =============================================================================
+//  Battery (MAX17048 fuel gauge)
+// =============================================================================
+void readBattery() {
+  uint8_t b[2];
+  if (!i2cRead(GAUGE_ADDR, 0x04, b, 2)) { battPct = -1; return; }   // SOC
+  int pct = b[0] + (b[1] >= 128 ? 1 : 0);                            // raw/256, rounded
+  battPct = constrain(pct, 0, 100);
+  if (i2cRead(GAUGE_ADDR, 0x02, b, 2))                               // VCELL
+    battVolts = ((b[0] << 8) | b[1]) * 78.125e-6f;
+}
+
+// =============================================================================
+//  Buttons (MCP23017 port A)
+// =============================================================================
+namespace mcp {
+  const uint8_t IODIRA = 0x00, IPOLA = 0x02, GPINTENA = 0x04, IOCON = 0x0A,
+                GPPUA  = 0x0C, GPIOA = 0x12;
+}
+uint8_t mcpPortA = 0xFF;          // last read of GPIOA (1 = released)
+bool    mcpOk    = false;
+
+bool mcpBegin() {
+  bool ok = i2cWrite8(MCP_ADDR, mcp::IOCON, 0x00);   // BANK=0, sequential addressing
+  ok = ok && i2cWrite8(MCP_ADDR, mcp::IODIRA, 0xFF); // port A all inputs
+  ok = ok && i2cWrite8(MCP_ADDR, mcp::IPOLA, 0x00);  // no input inversion
+  ok = ok && i2cWrite8(MCP_ADDR, mcp::GPPUA, BTN_MASK);  // 100k pull-ups on buttons
+  ok = ok && i2cWrite8(MCP_ADDR, mcp::GPINTENA, 0x00);   // polled, no interrupts
+  return ok;
+}
+void mcpPoll() {
+  static uint32_t last = 0;
+  uint32_t now = millis();
+  if (now - last < MCP_POLL_MS) return;
+  last = now;
+  uint8_t v;
+  if (mcpOk && i2cRead(MCP_ADDR, mcp::GPIOA, &v, 1)) mcpPortA = v;
+  else mcpPortA = 0xFF;            // bus error -> treat everything as released
+}
+
+Button bUp{BTN_BIT_UP}, bDown{BTN_BIT_DOWN}, bOk{BTN_BIT_OK},
+       bBack{BTN_BIT_BACK}, bLeft{BTN_BIT_LEFT}, bRight{BTN_BIT_RIGHT};
 
 const uint32_t DEBOUNCE_MS = 25, REPEAT_DELAY = 420, REPEAT_RATE = 120;
 
 void pollButton(Button& b, bool allowRepeat) {
   b.pressedEv = false;
-  bool raw = (digitalRead(b.pin) == LOW);
+  bool raw = !(mcpPortA & (1 << b.bit));   // active LOW
   uint32_t now = millis();
   if (raw != b.last && (now - b.tChange) > DEBOUNCE_MS) {
     b.last = raw; b.tChange = now;
@@ -612,6 +824,7 @@ void pollButton(Button& b, bool allowRepeat) {
   }
 }
 void pollButtons() {
+  mcpPoll();
   pollButton(bUp, true);   pollButton(bDown, true);
   pollButton(bOk, false);  pollButton(bBack, false);
   pollButton(bLeft, false); pollButton(bRight, false);
@@ -741,6 +954,15 @@ void drawHomeHUD() {
   }
   oled.setCursor(96, 3); oled.print(bandLabel);
 
+  // Battery: small cell icon + percentage (hidden if the gauge isn't found).
+  if (battPct >= 0) {
+    oled.drawRect(40, 3, 10, 7, SSD1306_WHITE);           // body
+    oled.drawFastVLine(50, 5, 3, SSD1306_WHITE);          // nub
+    int bw = 8 * battPct / 100;
+    if (bw > 0) oled.fillRect(41, 4, bw, 5, SSD1306_WHITE);
+    oled.setCursor(53, 3); oled.print(battPct); oled.print("%");
+  }
+
   // XP progress bar (raised a few px so it sits clear of the yellow/blue split
   // on two-tone OLEDs and looks tidy on mono panels).
   oled.drawRect(0, 11, 128, 4, SSD1306_WHITE);
@@ -804,6 +1026,9 @@ void drawLog() {
   // Lifetime statistics for the whole device (persist across reboots).
   oled.setFont(); oled.setTextSize(1); oled.setTextColor(SSD1306_WHITE);
   oled.setCursor(0, 0); oled.print("Stats");
+  if (sdState != SDS_NONE) {                      // SD = archiving, SD! = unreadable
+    oled.setCursor(36, 0); oled.print(sdState == SDS_READY ? "SD" : "SD!");
+  }
   oled.setCursor(66, 0); oled.print("Age "); oled.print(formatAge(pet.ageSec));
   oled.drawFastHLine(0, 10, OLED_WIDTH, SSD1306_WHITE);
   uint32_t nAP = seenAP.size(), nBLE = seenBLE.size(), nCli = seenClient.size();
@@ -832,11 +1057,13 @@ int buildMenu(MItem* out) {
     out[n++] = {mode == MODE_PROMISC ? "Promisc: ON" : "Promisc Harvest", 5};
   out[n++] = {"Config: serial", 6};
   out[n++] = {"Save now", 7};
-  out[n++] = {confirmReset ? "Reset? OK=yes" : "Reset pet", 8};
+  if (sdState != SDS_NONE)                       // card inserted (readable or not)
+    out[n++] = {confirmId == 9 ? "Format? OK=yes" : "Format SD", 9};
+  out[n++] = {confirmId == 8 ? "Reset? OK=yes" : "Reset pet", 8};
   return n;
 }
 void drawMenu() {
-  MItem items[10]; int n = buildMenu(items);
+  MItem items[12]; int n = buildMenu(items);
   if (menuIdx >= n) menuIdx = n - 1;
   const int rows = 5;
   if (menuIdx < menuTop) menuTop = menuIdx;
@@ -868,6 +1095,20 @@ void render() {
 // =============================================================================
 //  Input dispatch
 // =============================================================================
+// Full-screen message (used around blocking operations like formatting).
+void showMessage(const char* l1, const char* l2) {
+  oled.clearDisplay(); oled.setFont(); oled.setTextSize(1); oled.setTextColor(SSD1306_WHITE);
+  oled.setCursor(4, 22); oled.print(l1);
+  if (l2) { oled.setCursor(4, 34); oled.print(l2); }
+  oled.display();
+}
+void doFormatSD() {
+  showMessage("Formatting SD...", "don't remove card");
+  bool ok = sdFormat();
+  showMessage(ok ? "SD formatted" : "SD format failed", ok ? "FAT32, log restarted" : "check card / serial");
+  Serial.println(ok ? F("SD formatted.") : F("SD format failed."));
+  delay(1500);
+}
 void handleMenuSelect(int id) {
   switch (id) {
     case 0: doFeed(); break;
@@ -882,22 +1123,23 @@ void handleMenuSelect(int id) {
     case 6: say("use USB serial", 2200); break;
     case 7: saveState(); saveSeenSet(SEEN_PATH_AP, seenAP);
             saveSeenSet(SEEN_PATH_BLE, seenBLE); saveSeenSet(SEEN_PATH_CLIENT, seenClient);
-            storageFlush(); say("saved"); break;
-    case 8: if (confirmReset) { doResetPet(); confirmReset = false; } else confirmReset = true; break;
+            storageFlush(); sdFlush(); say("saved"); break;
+    case 8: if (confirmId == 8) { doResetPet(); confirmId = -1; } else confirmId = 8; break;
+    case 9: if (confirmId == 9) { confirmId = -1; doFormatSD(); } else confirmId = 9; break;
   }
 }
 void handleInput() {
   const Screen order[] = {SC_HOME, SC_STATS, SC_LOG, SC_MENU};
   auto idxOf = [&](Screen s){ for (int i = 0; i < 4; i++) if (order[i] == s) return i; return 0; };
-  if (bRight.pressedEv) { screen = order[(idxOf(screen) + 1) % 4]; confirmReset = false; }
-  if (bLeft.pressedEv)  { screen = order[(idxOf(screen) + 3) % 4]; confirmReset = false; }
+  if (bRight.pressedEv) { screen = order[(idxOf(screen) + 1) % 4]; confirmId = -1; }
+  if (bLeft.pressedEv)  { screen = order[(idxOf(screen) + 3) % 4]; confirmId = -1; }
 
   if (screen == SC_MENU) {
-    MItem items[10]; int n = buildMenu(items);
-    if (bUp.pressedEv)   { menuIdx = (menuIdx + n - 1) % n; confirmReset = false; }
-    if (bDown.pressedEv) { menuIdx = (menuIdx + 1) % n; confirmReset = false; }
+    MItem items[12]; int n = buildMenu(items);
+    if (bUp.pressedEv)   { menuIdx = (menuIdx + n - 1) % n; confirmId = -1; }
+    if (bDown.pressedEv) { menuIdx = (menuIdx + 1) % n; confirmId = -1; }
     if (bOk.pressedEv)   handleMenuSelect(items[menuIdx].id);
-    if (bBack.pressedEv) { screen = SC_HOME; confirmReset = false; }
+    if (bBack.pressedEv) { screen = SC_HOME; confirmId = -1; }
   } else {
     if (screen == SC_HOME) {
       if (bOk.pressedEv) doPet();     // quick interact
@@ -956,6 +1198,14 @@ void serviceSerial() {
       Serial.printf("Home SSID=%s  Wigle=%s  Mode=%s\n",
                     cfgHomeSSID.c_str(), cfgWigleName.length() ? "set" : "unset",
                     mode == MODE_SCAN ? "scan" : (mode == MODE_PROMISC ? "promisc" : "monitor"));
+#if ENABLE_SD
+      if (sdState == SDS_READY)
+        Serial.printf("SD=ready %lluMB  archived this session=%u  file=%s\n",
+                      SD.cardSize() / (1024ULL * 1024ULL), (unsigned)sdRecords, SD_CAPTURE_PATH);
+      else Serial.println(sdState == SDS_ERROR ? F("SD=unreadable (menu > Format SD)") : F("SD=none"));
+#endif
+      if (battPct >= 0) Serial.printf("Battery=%d%% (%.2f V)\n", battPct, battVolts);
+      else              Serial.println(F("Battery=n/a (MAX17048 not found)"));
       break;
     case 'w': {
       int sp = rest.indexOf(' ');
@@ -975,7 +1225,7 @@ void serviceSerial() {
       break;
     case 'd': dumpCaptures(); break;
     case 's': saveState(); saveSeenSet(SEEN_PATH_AP, seenAP); saveSeenSet(SEEN_PATH_BLE, seenBLE);
-              saveSeenSet(SEEN_PATH_CLIENT, seenClient); storageFlush(); Serial.println(F("saved.")); break;
+              saveSeenSet(SEEN_PATH_CLIENT, seenClient); storageFlush(); sdFlush(); Serial.println(F("saved.")); break;
     case 'c': storageClear(); Serial.println(F("storage cleared.")); break;
     case 'x': doResetPet(); Serial.println(F("pet reset.")); break;
     default:  printHelp(); break;
@@ -989,11 +1239,12 @@ void setup() {
   Serial.begin(115200); delay(150);
   Serial.println(F("\nWarPet booting..."));
 
-  pinMode(PIN_BTN_UP, INPUT_PULLUP);   pinMode(PIN_BTN_DOWN, INPUT_PULLUP);
-  pinMode(PIN_BTN_OK, INPUT_PULLUP);   pinMode(PIN_BTN_BACK, INPUT_PULLUP);
-  pinMode(PIN_BTN_LEFT, INPUT_PULLUP); pinMode(PIN_BTN_RIGHT, INPUT_PULLUP);
-
   Wire.begin();
+  mcpOk = mcpBegin();
+  if (!mcpOk) Serial.println(F("MCP23017 not found at 0x20 (buttons disabled)"));
+  readBattery();
+  if (battPct < 0) Serial.println(F("MAX17048 not found at 0x36 (no battery %)"));
+
   if (!oled.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR))
     Serial.println(F("SSD1306 not found (check 0x3C/0x3D + wiring)"));
   oled.setRotation(OLED_ROTATION);
@@ -1005,6 +1256,7 @@ void setup() {
   loadConfig();
   loadState();
   storageInit();
+  sdBegin();
   loadSeenSet(SEEN_PATH_AP, seenAP, MAX_SEEN_AP);
   loadSeenSet(SEEN_PATH_BLE, seenBLE, MAX_SEEN_BLE);
   loadSeenSet(SEEN_PATH_CLIENT, seenClient, MAX_SEEN_CLIENT);
@@ -1046,11 +1298,15 @@ void loop() {
 #endif
 
   serviceSerial();
+  sdService();
 
   // Accumulate powered-on lifetime (whole seconds; survives millis() wrap).
   static uint32_t lastAgeMs = millis();
   uint32_t dAge = now - lastAgeMs;
   if (dAge >= 1000) { pet.ageSec += dAge / 1000; lastAgeMs += (dAge / 1000) * 1000; }
+
+  static uint32_t lastBatt = 0;
+  if (now - lastBatt >= GAUGE_POLL_MS) { lastBatt = now; readBattery(); }
 
   static uint32_t lastTick = 0;
   if (now - lastTick >= STAT_TICK_MS) { lastTick = now; statTick(); }
@@ -1063,6 +1319,7 @@ void loop() {
     saveSeenSet(SEEN_PATH_BLE, seenBLE);
     saveSeenSet(SEEN_PATH_CLIENT, seenClient);
     storageFlush();
+    sdFlush();
   }
 
   static uint32_t lastFrame = 0;
